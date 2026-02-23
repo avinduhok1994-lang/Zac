@@ -1,0 +1,7 @@
+{
+  "name": "Zac - Social Voice & Discovery",
+  "description": "A real-time social platform for micro-conversations, wake-up calls, and topic-based matching.",
+  "requestFramePermissions": [
+    "microphone"
+  ]
+}
