@@ -34,7 +34,7 @@ const socket: Socket = io();
 
 export default function App() {
   const [user, setUser] = useState<User | null>(null);
-  const [view, setView] = useState<'onboarding' | 'feed' | 'chat' | 'call' | 'summary' | 'blogs'>('onboarding');
+  const [view, setView] = useState<'onboarding' | 'feed' | 'chat' | 'call' | 'summary' | 'blogs' | 'profile'>('onboarding');
   const [requests, setRequests] = useState<Request[]>([]);
   const [blogs, setBlogs] = useState<Blog[]>([]);
   const [activeConversationId, setActiveConversationId] = useState<string | null>(null);
@@ -247,7 +247,9 @@ export default function App() {
             <ShieldCheck className="w-4 h-4 text-emerald-400" />
             <span className="text-xs font-semibold">{user.trust_score}</span>
           </div>
-          <img src={user.avatar} alt="Profile" className="w-9 h-9 rounded-full border border-white/20" referrerPolicy="no-referrer" />
+          <button onClick={() => setView('profile')}>
+            <img src={user.avatar} alt="Profile" className="w-9 h-9 rounded-full border border-white/20 hover:border-emerald-500 transition-colors" referrerPolicy="no-referrer" />
+          </button>
         </div>
       </header>
 
@@ -324,6 +326,64 @@ export default function App() {
                     <BlogCard key={blog.id} blog={blog} />
                   ))
                 )}
+              </div>
+            </motion.div>
+          )}
+
+          {view === 'profile' && (
+            <motion.div
+              key="profile"
+              initial={{ opacity: 0, y: 20 }}
+              animate={{ opacity: 1, y: 0 }}
+              exit={{ opacity: 0, y: -20 }}
+              className="space-y-8"
+            >
+              <div className="flex flex-col items-center text-center space-y-6">
+                <div className="relative">
+                  <div className="absolute inset-0 bg-emerald-500/20 rounded-full blur-2xl" />
+                  <img src={user.avatar} className="w-32 h-32 rounded-full border-4 border-emerald-500 relative z-10" referrerPolicy="no-referrer" />
+                </div>
+                <div>
+                  <h2 className="text-3xl font-black italic">@{user.username}</h2>
+                  <p className="text-white/40 font-bold uppercase tracking-widest text-xs mt-1">Voice Explorer</p>
+                </div>
+                
+                <div className="grid grid-cols-2 gap-4 w-full">
+                  <div className="bg-white/5 border border-white/10 rounded-3xl p-6 text-center">
+                    <ShieldCheck className="w-6 h-6 text-emerald-400 mx-auto mb-2" />
+                    <div className="text-2xl font-black">{user.trust_score}</div>
+                    <div className="text-[10px] font-bold text-white/40 uppercase tracking-widest">Trust Score</div>
+                  </div>
+                  <div className="bg-white/5 border border-white/10 rounded-3xl p-6 text-center">
+                    <Mic className="w-6 h-6 text-blue-400 mx-auto mb-2" />
+                    <div className="text-2xl font-black">{requests.filter(r => r.user_id === user.id).length}</div>
+                    <div className="text-[10px] font-bold text-white/40 uppercase tracking-widest">Requests</div>
+                  </div>
+                </div>
+
+                <button 
+                  onClick={() => setUser(null)}
+                  className="w-full py-4 bg-red-500/10 text-red-400 rounded-2xl font-bold border border-red-500/20 hover:bg-red-500/20 transition-colors"
+                >
+                  Sign Out
+                </button>
+              </div>
+
+              <div className="space-y-4">
+                <h3 className="text-xs font-bold uppercase tracking-widest text-white/40">Your Activity</h3>
+                <div className="space-y-3">
+                  {requests.filter(r => r.user_id === user.id).map(r => (
+                    <div key={r.id} className="bg-white/5 border border-white/10 rounded-2xl p-4 flex items-center justify-between">
+                      <div className="flex items-center gap-3">
+                        <div className={cn("p-2 rounded-lg", r.type === 'wake' ? "bg-blue-500/20 text-blue-400" : "bg-emerald-500/20 text-emerald-400")}>
+                          {r.type === 'wake' ? <Bell className="w-4 h-4" /> : <Mic className="w-4 h-4" />}
+                        </div>
+                        <div className="text-sm font-medium truncate max-w-[150px]">{r.topic}</div>
+                      </div>
+                      <span className="text-[10px] font-bold uppercase tracking-widest text-white/20">{r.status}</span>
+                    </div>
+                  ))}
+                </div>
               </div>
             </motion.div>
           )}
@@ -560,7 +620,13 @@ export default function App() {
           <BookOpen className="w-6 h-6" />
           <span className="text-[10px] font-bold uppercase tracking-widest">Blogs</span>
         </button>
-        <button className="flex flex-col items-center gap-1 text-white/40 hover:text-white/60 transition-colors">
+        <button 
+          onClick={() => setView('profile')}
+          className={cn(
+            "flex flex-col items-center gap-1 transition-colors",
+            view === 'profile' ? "text-emerald-500" : "text-white/40 hover:text-white/60"
+          )}
+        >
           <UserIcon className="w-6 h-6" />
           <span className="text-[10px] font-bold uppercase tracking-widest">Profile</span>
         </button>

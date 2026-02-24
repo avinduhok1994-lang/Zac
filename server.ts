@@ -84,7 +84,14 @@ async function startServer() {
       .order("created_at", { ascending: false });
     
     if (error) return res.status(500).json({ error: error.message });
-    res.json(data);
+
+    const flattened = data.map(b => ({
+      ...b,
+      username: b.users?.username,
+      avatar: b.users?.avatar
+    }));
+
+    res.json(flattened);
   });
 
   app.post("/api/blogs", async (req, res) => {

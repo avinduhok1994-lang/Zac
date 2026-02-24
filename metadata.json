@@ -1,6 +1,6 @@
 {
   "name": "Zac - Social Voice & Discovery",
-  "description": "A real-time social platform for micro-conversations, wake-up calls, and topic-based matching.",
+  "description": "A real-time social platform for micro-conversations, wake-up calls, topic-based matching, and community blogs.",
   "requestFramePermissions": [
     "microphone"
   ]
