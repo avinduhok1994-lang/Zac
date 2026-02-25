@@ -66,6 +66,8 @@ export default function App() {
   }, [view]);
 
   useEffect(() => {
+    if (!supabase) return;
+
     supabase.auth.getSession().then(({ data: { session } }) => {
       setSession(session);
       if (session?.user) {
@@ -223,6 +225,7 @@ export default function App() {
   };
 
   const fetchMessages = async (convId: string) => {
+    if (!supabase) return;
     const { data, error } = await supabase
       .from('messages')
       .select('*')
@@ -237,22 +240,6 @@ export default function App() {
         created_at: m.created_at
       })));
     }
-  };
-
-  const handleOnboarding = async (username: string) => {
-    const newUser: User = {
-      id: generateId(),
-      username,
-      avatar: AVATARS[Math.floor(Math.random() * AVATARS.length)],
-      trust_score: 100
-    };
-    await fetch('/api/users', {
-      method: 'POST',
-      headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify(newUser)
-    });
-    setUser(newUser);
-    setView('feed');
   };
 
   const createRequest = async (type: 'wake' | 'topic', topic: string, time?: string) => {
@@ -383,6 +370,18 @@ export default function App() {
     setIsSummarizing(false);
     setView('summary');
   };
+
+  if (!supabase) {
+    return (
+      <div className="min-h-screen bg-[#050505] text-white flex flex-col items-center justify-center p-8 text-center">
+        <AlertTriangle className="w-16 h-16 text-yellow-500 mb-6" />
+        <h1 className="text-2xl font-bold mb-4">Configuration Missing</h1>
+        <p className="text-white/60 max-w-md">
+          Supabase environment variables are missing. Please set <code className="text-emerald-400">VITE_SUPABASE_URL</code> and <code className="text-emerald-400">VITE_SUPABASE_ANON_KEY</code> in your Netlify dashboard.
+        </p>
+      </div>
+    );
+  }
 
   if (!user) {
     return <Auth onComplete={() => {}} />;
