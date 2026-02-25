@@ -25,18 +25,18 @@ import {
   LayoutGrid,
   Image as ImageIcon
 } from 'lucide-react';
-import { io, Socket } from 'socket.io-client';
-import { User, Request, Message, Blog } from './types';
+import { User, Request, Message, Blog, Post } from './types';
 import { cn, generateId, AVATARS } from './lib/utils';
 import { generateIcebreaker, summarizeConversation, moderateMessage } from './services/geminiService';
-
-const socket: Socket = io();
+import { supabase } from './lib/supabase';
 
 export default function App() {
   const [user, setUser] = useState<User | null>(null);
-  const [view, setView] = useState<'onboarding' | 'feed' | 'chat' | 'call' | 'summary' | 'blogs' | 'profile'>('onboarding');
+  const [session, setSession] = useState<any>(null);
+  const [view, setView] = useState<'onboarding' | 'feed' | 'chat' | 'call' | 'summary' | 'blogs' | 'profile' | 'posts'>('onboarding');
   const [requests, setRequests] = useState<Request[]>([]);
   const [blogs, setBlogs] = useState<Blog[]>([]);
+  const [posts, setPosts] = useState<Post[]>([]);
   const [activeConversationId, setActiveConversationId] = useState<string | null>(null);
   const [messages, setMessages] = useState<Message[]>([]);
   const [newMessage, setNewMessage] = useState('');
@@ -66,42 +66,106 @@ export default function App() {
   }, [view]);
 
   useEffect(() => {
+    supabase.auth.getSession().then(({ data: { session } }) => {
+      setSession(session);
+      if (session?.user) {
+        syncUser(session.user);
+      }
+    });
+
+    const { data: { subscription } } = supabase.auth.onAuthStateChange((_event, session) => {
+      setSession(session);
+      if (session?.user) {
+        syncUser(session.user);
+      } else {
+        setUser(null);
+        setView('onboarding');
+      }
+    });
+
+    return () => subscription.unsubscribe();
+  }, []);
+
+  const syncUser = async (supabaseUser: any) => {
+    // Check if user exists in our users table
+    const { data, error } = await supabase
+      .from('users')
+      .select('*')
+      .eq('id', supabaseUser.id)
+      .single();
+
+    if (data) {
+      setUser(data);
+      setView('feed');
+    } else {
+      // Create user if not exists
+      const newUser: User = {
+        id: supabaseUser.id,
+        username: supabaseUser.email?.split('@')[0] || 'user',
+        avatar: AVATARS[Math.floor(Math.random() * AVATARS.length)],
+        trust_score: 100
+      };
+      await supabase.from('users').upsert(newUser);
+      setUser(newUser);
+      setView('feed');
+    }
+  };
+
+  useEffect(() => {
     if (user) {
       fetchRequests();
       fetchBlogs();
-    }
-  }, [user]);
+      fetchPosts();
 
-  useEffect(() => {
-    socket.on('new_message', (msg: any) => {
-      const normalizedMsg: Message = {
-        conversationId: msg.conversationId || msg.conversation_id,
-        senderId: msg.senderId || msg.sender_id,
-        content: msg.content,
-        created_at: msg.created_at
+      // Subscribe to real-time messages
+      const messageChannel = supabase
+        .channel('messages')
+        .on('postgres_changes', { 
+          event: 'INSERT', 
+          schema: 'public', 
+          table: 'messages' 
+        }, (payload) => {
+          const msg = payload.new as any;
+          if (msg.conversation_id === activeConversationId) {
+            setMessages(prev => [...prev, {
+              conversationId: msg.conversation_id,
+              senderId: msg.sender_id,
+              content: msg.content,
+              created_at: msg.created_at
+            }]);
+          }
+        })
+        .subscribe();
+
+      // Subscribe to conversation matches
+      const conversationChannel = supabase
+        .channel('conversations')
+        .on('postgres_changes', { 
+          event: 'INSERT', 
+          schema: 'public', 
+          table: 'conversations' 
+        }, async (payload) => {
+          const conv = payload.new as any;
+          if (conv.user1_id === user.id || conv.user2_id === user.id) {
+            const partnerId = conv.user1_id === user.id ? conv.user2_id : conv.user1_id;
+            const { data: partner } = await supabase.from('users').select('username, avatar').eq('id', partnerId).single();
+            
+            if (partner) {
+              setCallPartner({ username: partner.username, avatar: partner.avatar, id: partnerId });
+              setActiveConversationId(conv.id);
+              setView('call');
+              fetchMessages(conv.id);
+            }
+          }
+        })
+        .subscribe();
+
+      return () => {
+        supabase.removeChannel(messageChannel);
+        supabase.removeChannel(conversationChannel);
       };
-      if (normalizedMsg.conversationId === activeConversationId) {
-        setMessages(prev => [...prev, normalizedMsg]);
-      }
-    });
-
-    socket.on('request_matched', async (data: { requestId: string, conversationId: string, user1: any, user2: any }) => {
-      if (user && (data.user1.id === user.id || data.user2.id === user.id)) {
-        const partner = data.user1.id === user.id ? data.user2 : data.user1;
-        setCallPartner({ username: partner.username, avatar: partner.avatar, id: partner.id });
-        setActiveConversationId(data.conversationId);
-        setView('call');
-        socket.emit('join_conversation', data.conversationId);
-        fetchMessages(data.conversationId);
-      }
-      fetchRequests();
-    });
-
-    return () => {
-      socket.off('new_message');
-      socket.off('request_matched');
-    };
-  }, [activeConversationId, user]);
+    }
+  }, [user, activeConversationId]);
 
   useEffect(() => {
     if (scrollRef.current) {
@@ -110,26 +174,69 @@ export default function App() {
   }, [messages]);
 
   const fetchRequests = async () => {
-    const res = await fetch('/api/requests/active');
-    const data = await res.json();
-    setRequests(data);
+    const { data, error } = await supabase
+      .from('requests')
+      .select('*, users(username, avatar)')
+      .eq('status', 'active')
+      .order('created_at', { ascending: false });
+    
+    if (!error && data) {
+      const flattened = data.map(r => ({
+        ...r,
+        username: r.users?.username,
+        avatar: r.users?.avatar
+      }));
+      setRequests(flattened);
+    }
   };
 
   const fetchBlogs = async () => {
-    const res = await fetch('/api/blogs');
-    const data = await res.json();
-    setBlogs(data);
+    const { data, error } = await supabase
+      .from('blogs')
+      .select('*, users(username, avatar)')
+      .order('created_at', { ascending: false });
+    
+    if (!error && data) {
+      const flattened = data.map(b => ({
+        ...b,
+        username: b.users?.username,
+        avatar: b.users?.avatar
+      }));
+      setBlogs(flattened);
+    }
+  };
+
+  const fetchPosts = async () => {
+    const { data, error } = await supabase
+      .from('posts')
+      .select('*, users(username, avatar)')
+      .order('created_at', { ascending: false });
+    
+    if (!error && data) {
+      const flattened = data.map(p => ({
+        ...p,
+        username: p.users?.username,
+        avatar: p.users?.avatar
+      }));
+      setPosts(flattened);
+    }
   };
 
   const fetchMessages = async (convId: string) => {
-    const res = await fetch(`/api/messages/${convId}`);
-    const data = await res.json();
-    setMessages(data.map((m: any) => ({
-      conversationId: m.conversation_id,
-      senderId: m.sender_id,
-      content: m.content,
-      created_at: m.created_at
-    })));
+    const { data, error } = await supabase
+      .from('messages')
+      .select('*')
+      .eq('conversation_id', convId)
+      .order('created_at', { ascending: true });
+    
+    if (!error && data) {
+      setMessages(data.map(m => ({
+        conversationId: m.conversation_id,
+        senderId: m.sender_id,
+        content: m.content,
+        created_at: m.created_at
+      })));
+    }
   };
 
   const handleOnboarding = async (username: string) => {
@@ -150,44 +257,89 @@ export default function App() {
 
   const createRequest = async (type: 'wake' | 'topic', topic: string, time?: string) => {
     if (!user) return;
-    const newRequest: Request = {
-      id: generateId(),
-      user_id: user.id,
-      type,
-      topic,
-      scheduled_time: time,
-      status: 'active',
-      created_at: new Date().toISOString()
-    };
-    await fetch('/api/requests', {
-      method: 'POST',
-      headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify(newRequest)
-    });
-    setShowCreateModal(false);
-    fetchRequests();
+    const { error } = await supabase
+      .from('requests')
+      .insert({
+        id: generateId(),
+        user_id: user.id,
+        type,
+        topic,
+        scheduled_time: time,
+        status: 'active'
+      });
+    
+    if (!error) {
+      setShowCreateModal(false);
+      fetchRequests();
+    }
   };
 
   const createBlog = async (title: string, content: string, imageUrl: string) => {
     if (!user) return;
-    await fetch('/api/blogs', {
-      method: 'POST',
-      headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({
+    const { error } = await supabase
+      .from('blogs')
+      .insert({
         title,
         content,
         author_id: user.id,
         image_url: imageUrl,
         tags: ['voice', 'social']
-      })
-    });
-    setShowBlogModal(false);
-    fetchBlogs();
+      });
+    
+    if (!error) {
+      setShowBlogModal(false);
+      fetchBlogs();
+    }
   };
 
-  const handleMatch = (requestId: string) => {
+  const createPost = async (content: string) => {
     if (!user) return;
-    socket.emit('match_request', { requestId, matcherId: user.id });
+    const { error } = await supabase
+      .from('posts')
+      .insert({ content, user_id: user.id });
+    
+    if (!error) fetchPosts();
+  };
+
+  const deletePost = async (postId: number) => {
+    const { error } = await supabase
+      .from('posts')
+      .delete()
+      .eq('id', postId);
+    
+    if (!error) fetchPosts();
+  };
+
+  const handleMatch = async (requestId: string) => {
+    if (!user) return;
+    
+    const { data: request } = await supabase
+      .from('requests')
+      .select('*')
+      .eq('id', requestId)
+      .single();
+
+    if (request && request.status === 'active') {
+      const conversationId = `conv_${Date.now()}`;
+      
+      // Update request status
+      await supabase
+        .from('requests')
+        .update({ status: 'matched' })
+        .eq('id', requestId);
+      
+      // Create conversation
+      await supabase
+        .from('conversations')
+        .insert({ 
+          id: conversationId, 
+          request_id: requestId, 
+          user1_id: request.user_id, 
+          user2_id: user.id 
+        });
+      
+      // The real-time listener will pick this up and set the view
+    }
   };
 
   const sendMessage = async () => {
@@ -200,22 +352,26 @@ export default function App() {
       return;
     }
 
-    const msg: Message = {
-      conversationId: activeConversationId,
-      senderId: user.id,
-      content: newMessage
-    };
-    socket.emit('send_message', msg);
+    await supabase
+      .from('messages')
+      .insert({
+        conversation_id: activeConversationId,
+        sender_id: user.id,
+        content: newMessage
+      });
+
     setNewMessage('');
   };
 
   const handleEndChat = async (rating?: number) => {
     if (rating && callPartner) {
-      await fetch('/api/users/rate', {
-        method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ userId: callPartner.id, rating })
-      });
+      const { data: partner } = await supabase.from('users').select('trust_score').eq('id', callPartner.id).single();
+      if (partner) {
+        await supabase
+          .from('users')
+          .update({ trust_score: (partner.trust_score || 100) + rating })
+          .eq('id', callPartner.id);
+      }
     }
 
     setIsSummarizing(true);
@@ -229,7 +385,7 @@ export default function App() {
   };
 
   if (!user) {
-    return <Onboarding onComplete={handleOnboarding} />;
+    return <Auth onComplete={() => {}} />;
   }
 
   return (
@@ -330,6 +486,44 @@ export default function App() {
             </motion.div>
           )}
 
+          {view === 'posts' && (
+            <motion.div
+              key="posts"
+              initial={{ opacity: 0, y: 20 }}
+              animate={{ opacity: 1, y: 0 }}
+              exit={{ opacity: 0, y: -20 }}
+              className="space-y-8"
+            >
+              <div className="flex items-center justify-between">
+                <h2 className="text-2xl font-bold">Community Posts</h2>
+              </div>
+
+              <div className="bg-white/5 border border-white/10 rounded-[32px] p-6">
+                <CreatePostForm onPost={createPost} />
+              </div>
+
+              <div className="grid gap-4">
+                {posts.length === 0 ? (
+                  <div className="py-20 text-center space-y-4">
+                    <div className="w-16 h-16 bg-white/5 rounded-full flex items-center justify-center mx-auto">
+                      <Sparkles className="w-8 h-8 text-white/20" />
+                    </div>
+                    <p className="text-white/40 font-medium">No posts yet. Be the first!</p>
+                  </div>
+                ) : (
+                  posts.map((post) => (
+                    <PostCard 
+                      key={post.id} 
+                      post={post} 
+                      onDelete={() => deletePost(post.id)}
+                      isOwn={post.user_id === user.id}
+                    />
+                  ))
+                )}
+              </div>
+            </motion.div>
+          )}
+
           {view === 'profile' && (
             <motion.div
               key="profile"
@@ -362,7 +556,7 @@ export default function App() {
                 </div>
 
                 <button 
-                  onClick={() => setUser(null)}
+                  onClick={() => supabase.auth.signOut()}
                   className="w-full py-4 bg-red-500/10 text-red-400 rounded-2xl font-bold border border-red-500/20 hover:bg-red-500/20 transition-colors"
                 >
                   Sign Out
@@ -609,6 +803,16 @@ export default function App() {
         >
           <LayoutGrid className="w-6 h-6" />
           <span className="text-[10px] font-bold uppercase tracking-widest">Feed</span>
+        </button>
+        <button 
+          onClick={() => setView('posts')}
+          className={cn(
+            "flex flex-col items-center gap-1 transition-colors",
+            view === 'posts' ? "text-emerald-500" : "text-white/40 hover:text-white/60"
+          )}
+        >
+          <Sparkles className="w-6 h-6" />
+          <span className="text-[10px] font-bold uppercase tracking-widest">Posts</span>
         </button>
         <button 
           onClick={() => setView('blogs')}
@@ -861,6 +1065,161 @@ function CreateRequestForm({ onPost }: { onPost: (type: 'wake' | 'topic', topic:
       >
         Post Request
       </button>
+    </div>
+  );
+}
+
+function CreatePostForm({ onPost }: { onPost: (content: string) => void }) {
+  const [content, setContent] = useState('');
+
+  const handleSubmit = () => {
+    if (!content.trim()) return;
+    onPost(content);
+    setContent('');
+  };
+
+  return (
+    <div className="space-y-4">
+      <textarea 
+        value={content}
+        onChange={(e) => setContent(e.target.value)}
+        placeholder="What's happening?"
+        className="w-full bg-white/5 border border-white/10 rounded-2xl p-4 h-24 focus:outline-none focus:border-emerald-500/50 transition-colors resize-none"
+      />
+      <div className="flex justify-end">
+        <button 
+          onClick={handleSubmit}
+          className="px-6 py-2 bg-emerald-500 text-black rounded-xl font-bold hover:scale-105 transition-transform active:scale-95"
+        >
+          Post
+        </button>
+      </div>
+    </div>
+  );
+}
+
+function PostCard({ post, onDelete, isOwn }: { post: Post, onDelete: () => void, isOwn: boolean }) {
+  return (
+    <motion.div 
+      initial={{ opacity: 0, y: 10 }}
+      animate={{ opacity: 1, y: 0 }}
+      className="bg-[#111] border border-white/5 rounded-[24px] p-6 hover:border-white/10 transition-colors group"
+    >
+      <div className="flex items-start justify-between mb-4">
+        <div className="flex items-center gap-3">
+          <img src={post.avatar} className="w-8 h-8 rounded-full border border-white/10" referrerPolicy="no-referrer" />
+          <div>
+            <h4 className="font-bold text-sm">@{post.username}</h4>
+            <span className="text-[10px] text-white/20 font-bold uppercase tracking-widest">
+              {new Date(post.created_at).toLocaleDateString()}
+            </span>
+          </div>
+        </div>
+        {isOwn && (
+          <button 
+            onClick={onDelete}
+            className="p-2 text-white/20 hover:text-red-400 hover:bg-red-400/10 rounded-xl transition-all"
+          >
+            <X className="w-4 h-4" />
+          </button>
+        )}
+      </div>
+      <p className="text-white/80 leading-relaxed whitespace-pre-wrap">
+        {post.content}
+      </p>
+    </motion.div>
+  );
+}
+
+function Auth({ onComplete }: { onComplete: () => void }) {
+  const [isLogin, setIsLogin] = useState(true);
+  const [email, setEmail] = useState('');
+  const [password, setPassword] = useState('');
+  const [loading, setLoading] = useState(false);
+  const [error, setError] = useState<string | null>(null);
+
+  const handleAuth = async (e: React.FormEvent) => {
+    e.preventDefault();
+    setLoading(true);
+    setError(null);
+
+    try {
+      if (isLogin) {
+        const { error } = await supabase.auth.signInWithPassword({ email, password });
+        if (error) throw error;
+      } else {
+        const { error } = await supabase.auth.signUp({ email, password });
+        if (error) throw error;
+        alert('Check your email for the confirmation link!');
+      }
+    } catch (err: any) {
+      setError(err.message);
+    } finally {
+      setLoading(false);
+    }
+  };
+
+  return (
+    <div className="min-h-screen bg-[#050505] text-white flex flex-col items-center justify-center p-6">
+      <motion.div 
+        initial={{ opacity: 0, y: 20 }}
+        animate={{ opacity: 1, y: 0 }}
+        className="w-full max-w-md space-y-8 text-center"
+      >
+        <div className="space-y-4">
+          <div className="w-20 h-20 bg-emerald-500 rounded-[32px] flex items-center justify-center mx-auto shadow-2xl shadow-emerald-500/20">
+            <Mic className="text-black w-10 h-10" />
+          </div>
+          <h1 className="text-5xl font-black tracking-tighter italic">ZAC</h1>
+          <p className="text-white/40 font-medium uppercase tracking-[0.3em] text-xs">Social Voice Discovery</p>
+        </div>
+
+        <form onSubmit={handleAuth} className="space-y-4 text-left">
+          <div className="space-y-2">
+            <label className="text-xs font-bold uppercase tracking-[0.2em] text-white/30 ml-2">Email</label>
+            <input 
+              type="email"
+              value={email}
+              onChange={(e) => setEmail(e.target.value)}
+              placeholder="you@example.com"
+              className="w-full bg-white/5 border border-white/10 rounded-2xl px-6 py-4 focus:outline-none focus:border-emerald-500 transition-colors"
+              required
+            />
+          </div>
+          <div className="space-y-2">
+            <label className="text-xs font-bold uppercase tracking-[0.2em] text-white/30 ml-2">Password</label>
+            <input 
+              type="password"
+              value={password}
+              onChange={(e) => setPassword(e.target.value)}
+              placeholder="••••••••"
+              className="w-full bg-white/5 border border-white/10 rounded-2xl px-6 py-4 focus:outline-none focus:border-emerald-500 transition-colors"
+              required
+            />
+          </div>
+
+          {error && (
+            <div className="p-4 bg-red-500/10 border border-red-500/20 rounded-2xl text-red-400 text-sm">
+              {error}
+            </div>
+          )}
+
+          <button 
+            type="submit"
+            disabled={loading}
+            className="w-full py-5 bg-emerald-500 text-black rounded-2xl font-black text-xl hover:scale-[1.02] transition-transform active:scale-95 disabled:opacity-50 shadow-xl shadow-emerald-500/10"
+          >
+            {loading ? 'Processing...' : (isLogin ? 'Sign In' : 'Sign Up')}
+          </button>
+        </form>
+
+        <button 
+          onClick={() => setIsLogin(!isLogin)}
+          className="text-white/40 hover:text-white transition-colors text-sm font-bold"
+        >
+          {isLogin ? "Don't have an account? Sign Up" : "Already have an account? Sign In"}
+        </button>
+      </motion.div>
     </div>
   );
 }
